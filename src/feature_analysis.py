@@ -4,7 +4,7 @@ feature_analysis.py - Feature Correlation and Selection Analysis
 Provides utilities for analyzing feature multicollinearity and selecting
 orthogonal features for cleaner model interpretability.
 
-PHD-LEVEL RATIONALE:
+SOTA RATIONALE:
 --------------------
 Multiple string distance metrics (jaro_winkler, token_jaccard, rapidfuzz_ratio)
 are highly correlated. This module helps identify and select orthogonal features.

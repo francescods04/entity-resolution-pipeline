@@ -188,7 +188,7 @@ def analyze_errors(
 
 
 # =============================================================================
-# PHD-LEVEL SAMPLING STRATEGIES
+# SOTA SAMPLING STRATEGIES
 # =============================================================================
 
 def generate_stratified_test_set(
@@ -285,7 +285,7 @@ def generate_comprehensive_test_set(
     """
     Generate a comprehensive test set combining stratified and hard negative samples.
     
-    This creates a balanced, challenging test set suitable for PhD-level evaluation.
+    This creates a balanced, challenging test set suitable for rigorous evaluation.
     
     Args:
         candidates: All candidate pairs with features
@@ -362,7 +362,7 @@ def compute_error_bounds(
     """
     Compute error rate bounds with confidence intervals per tier.
     
-    Critical for PhD-level claims like:
+    Critical for research-grade claims like:
     "With 95% confidence, Tier A error rate is below X%"
     
     Args:

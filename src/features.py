@@ -326,7 +326,7 @@ def family_size_log(family_size: Optional[int]) -> float:
 
 
 # =============================================================================
-# LEARNED DISAMBIGUATION (PhD-LEVEL: NO MAGIC NUMBERS)
+# LEARNED DISAMBIGUATION (SOTA: NO MAGIC NUMBERS)
 # =============================================================================
 
 class LearnedDisambiguator:
@@ -334,7 +334,7 @@ class LearnedDisambiguator:
     Logistic Regression-based disambiguation scorer.
     
     Replaces hardcoded heuristic weights with a learned probabilistic model.
-    This is scientifically defensible for PhD-level research.
+    This is scientifically defensible for research-grade entity resolution.
     
     Usage:
         # Training
@@ -502,7 +502,7 @@ def compute_disambiguation_score(
     """
     warnings.warn(
         "compute_disambiguation_score() is deprecated and uses magic numbers. "
-        "Use LearnedDisambiguator.score() for PhD-level rigor.",
+        "Use LearnedDisambiguator.score() for rigorous scoring.",
         DeprecationWarning,
         stacklevel=2
     )

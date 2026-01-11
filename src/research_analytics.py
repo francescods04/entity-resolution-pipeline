@@ -2,7 +2,7 @@
 research_analytics.py - Analytics for Economic Research
 
 Generates statistics and visualizations suitable for:
-- PhD dissertation appendix
+- Research paper appendix
 - Journal paper methodology section
 - Robustness checks
 
@@ -425,7 +425,7 @@ def run_full_analytics(
 
 
 # =============================================================================
-# ABLATION STUDY FRAMEWORK (PHD REQUIREMENT)
+# ABLATION STUDY FRAMEWORK (RESEARCH REQUIREMENT)
 # =============================================================================
 
 ABLATION_CONFIGS = {
@@ -472,7 +472,7 @@ def run_ablation_study(
     """
     Run ablation study to measure marginal contribution of feature groups.
     
-    PHD REQUIREMENT: Proves that each feature group provides measurable value.
+    RESEARCH REQUIREMENT: Proves that each feature group provides measurable value.
     
     Args:
         features_df: Full feature DataFrame

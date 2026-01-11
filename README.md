@@ -90,7 +90,7 @@ If you want to dig deeper:
 
 ## Questions?
 
-This was built for PhD research on European startups and corporate governance. If you're using it for something similar and run into issues, the code is reasonably well-commented.
+This was built for academic research on European startups and corporate governance. If you're using it for something similar and run into issues, the code is reasonably well-commented.
 
 ---
 

@@ -2,7 +2,7 @@
 
 ## Entity Resolution Approach
 
-This project implements a **multi-stage entity resolution pipeline** designed to achieve PhD-level academic rigor in matching venture capital-backed European startups from Crunchbase with corporate entities in the Bureau van Dijk Orbis database.
+This project implements a **multi-stage entity resolution pipeline** designed to achieve state-of-the-art accuracy in matching venture capital-backed European startups from Crunchbase with corporate entities in the Bureau van Dijk Orbis database.
 
 ## Theoretical Foundation
 

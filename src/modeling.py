@@ -96,7 +96,7 @@ MODEL_FEATURES = TRAINING_FEATURES
 
 
 # =============================================================================
-# WEAK SUPERVISION LABEL MODEL (PHD-LEVEL: FORMALIZED CONFLICT RESOLUTION)
+# WEAK SUPERVISION LABEL MODEL (SOTA: FORMALIZED CONFLICT RESOLUTION)
 # =============================================================================
 
 class Rule:
@@ -137,7 +137,7 @@ class LabelModel:
     Aggregates votes from multiple labeling rules and resolves conflicts
     using configurable strategies.
     
-    PHD-LEVEL RATIONALE:
+    SOTA RATIONALE:
     --------------------
     This formalizes the weak supervision approach documented in METHODOLOGY.md.
     Instead of ad-hoc rule application, we explicitly:

@@ -1,0 +1,300 @@
+#!/usr/bin/env python3
+"""
+Generate the A100 Colab notebook.
+Run: python generate_notebook.py
+"""
+
+import json
+
+notebook = {
+    "cells": [
+        {
+            "cell_type": "markdown",
+            "metadata": {},
+            "source": [
+                "# 🚀 Entity Resolution Pipeline - A100 Optimized\n",
+                "\n",
+                "**Estimated runtime: ~45 minutes** (vs 3+ hours on M1 MacBook)\n",
+                "\n",
+                "## Prerequisites\n",
+                "1. Upload your data to Google Drive in this structure:\n",
+                "```\n",
+                "My Drive/\n",
+                "└── ricerca/\n",
+                "    ├── database-done.xlsx             ← Your manual matches file\n",
+                "    ├── entity-resolution-pipeline/    ← The full pipeline folder\n",
+                "    ├── dati europe cb/                ← Crunchbase data\n",
+                "    └── new orbis/                     ← Orbis Excel files (optional)\n",
+                "```\n",
+                "2. Select **A100 GPU** runtime (Runtime → Change runtime type → A100)\n",
+                "3. Run all cells in order"
+            ]
+        },
+        {
+            "cell_type": "code",
+            "execution_count": None,
+            "metadata": {},
+            "outputs": [],
+            "source": [
+                "#@title Cell 1: Mount Google Drive\n",
+                "from google.colab import drive\n",
+                "drive.mount('/content/drive')\n",
+                "\n",
+                "# === CONFIGURE YOUR PATHS HERE ===\n",
+                "DRIVE_ROOT = '/content/drive/MyDrive/ricerca'\n",
+                "PIPELINE_FOLDER = 'entity-resolution-pipeline'\n",
+                "\n",
+                "# Derived paths\n",
+                "PIPELINE_PATH = f'{DRIVE_ROOT}/{PIPELINE_FOLDER}'\n",
+                "CB_DATA_PATH = f'{DRIVE_ROOT}/dati europe cb'\n",
+                "ORBIS_DATA_PATH = f'{DRIVE_ROOT}/new orbis'\n",
+                "DB_DONE_PATH = f'{DRIVE_ROOT}/database-done.xlsx'\n",
+                "\n",
+                "import os\n",
+                "print(f'✅ Drive mounted')\n",
+                "print(f'📁 Pipeline: {PIPELINE_PATH}')\n",
+                "print(f'📁 Crunchbase: {CB_DATA_PATH}')\n",
+                "print(f'📁 Orbis: {ORBIS_DATA_PATH}')\n",
+                "print(f'📄 Database-done: {DB_DONE_PATH}')"
+            ]
+        },
+        {
+            "cell_type": "code",
+            "execution_count": None,
+            "metadata": {},
+            "outputs": [],
+            "source": [
+                "#@title Cell 2: Validate Data Exists\n",
+                "import os\n",
+                "\n",
+                "errors = []\n",
+                "\n",
+                "# Check pipeline folder\n",
+                "if not os.path.exists(PIPELINE_PATH):\n",
+                "    errors.append(f'❌ Pipeline folder not found: {PIPELINE_PATH}')\n",
+                "else:\n",
+                "    print(f'✅ Pipeline folder found')\n",
+                "    key_files = ['run_pipeline.py', 'src/data_io.py', 'src/normalize.py', 'configs']\n",
+                "    for f in key_files:\n",
+                "        if os.path.exists(f'{PIPELINE_PATH}/{f}'):\n",
+                "            print(f'   ✅ {f}')\n",
+                "        else:\n",
+                "            errors.append(f'   ❌ Missing: {f}')\n",
+                "\n",
+                "# Check Crunchbase data\n",
+                "if not os.path.exists(CB_DATA_PATH):\n",
+                "    errors.append(f'❌ Crunchbase data not found: {CB_DATA_PATH}')\n",
+                "else:\n",
+                "    print(f'✅ Crunchbase data found')\n",
+                "\n",
+                "# Check for existing Orbis parquet\n",
+                "orbis_parquet = f'{PIPELINE_PATH}/data/interim/orbis_clean/orbis_raw.parquet'\n",
+                "if os.path.exists(orbis_parquet):\n",
+                "    size_gb = os.path.getsize(orbis_parquet) / 1e9\n",
+                "    print(f'✅ Orbis parquet found ({size_gb:.2f} GB) - Will skip Excel conversion')\n",
+                "elif os.path.exists(ORBIS_DATA_PATH):\n",
+                "    print(f'⚠️ No Orbis parquet, will convert from Excel (slow)')\n",
+                "else:\n",
+                "    errors.append(f'❌ No Orbis data found')\n",
+                "\n",
+                "# Check database-done.xlsx\n",
+                "if os.path.exists(DB_DONE_PATH):\n",
+                "    print(f'✅ database-done.xlsx found')\n",
+                "else:\n",
+                "    print(f'⚠️ database-done.xlsx not found (alias step will be limited)')\n",
+                "\n",
+                "if errors:\n",
+                "    print('\\n🛑 ERRORS FOUND:')\n",
+                "    for e in errors:\n",
+                "        print(e)\n",
+                "    raise Exception('Please fix the errors above before continuing')\n",
+                "else:\n",
+                "    print('\\n🎉 All data validated! Ready to proceed.')"
+            ]
+        },
+        {
+            "cell_type": "code",
+            "execution_count": None,
+            "metadata": {},
+            "outputs": [],
+            "source": [
+                "#@title Cell 3: Check GPU and Install Dependencies\n",
+                "!nvidia-smi\n",
+                "\n",
+                "print('\\n📦 Installing dependencies...')\n",
+                "!pip install -q sentence-transformers faiss-gpu pandas pyarrow tqdm rapidfuzz scikit-learn pyyaml joblib openpyxl xlrd numpy\n",
+                "\n",
+                "import torch\n",
+                "print(f'\\n✅ PyTorch version: {torch.__version__}')\n",
+                "print(f'✅ CUDA available: {torch.cuda.is_available()}')\n",
+                "if torch.cuda.is_available():\n",
+                "    print(f'✅ GPU: {torch.cuda.get_device_name(0)}')\n",
+                "    print(f'✅ VRAM: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB')\n",
+                "else:\n",
+                "    print('⚠️ No GPU detected! Select GPU runtime: Runtime → Change runtime type → A100')"
+            ]
+        },
+        {
+            "cell_type": "code",
+            "execution_count": None,
+            "metadata": {},
+            "outputs": [],
+            "source": [
+                "#@title Cell 4: Setup Python Path\n",
+                "import sys\n",
+                "sys.path.insert(0, PIPELINE_PATH)\n",
+                "sys.path.insert(0, f'{PIPELINE_PATH}/src')\n",
+                "\n",
+                "%cd {PIPELINE_PATH}\n",
+                "\n",
+                "try:\n",
+                "    from config import Config, get_project_paths\n",
+                "    from data_io import ingest_all_data\n",
+                "    from normalize import normalize_name\n",
+                "    print('✅ All core modules imported successfully')\n",
+                "except ImportError as e:\n",
+                "    print(f'❌ Import error: {e}')\n",
+                "    raise"
+            ]
+        },
+        {
+            "cell_type": "code",
+            "execution_count": None,
+            "metadata": {},
+            "outputs": [],
+            "source": [
+                "#@title Cell 5: Create A100-Optimized Config\n",
+                "a100_config = f'''\n",
+                "# A100 Optimized Configuration\n",
+                "paths:\n",
+                "  project_root: {PIPELINE_PATH}\n",
+                "  raw_crunchbase: {CB_DATA_PATH}\n",
+                "  raw_orbis: {ORBIS_DATA_PATH}\n",
+                "\n",
+                "blocking:\n",
+                "  max_candidates_per_cb: 500\n",
+                "  same_country_boost: 2.0\n",
+                "\n",
+                "embeddings:\n",
+                "  enabled: true\n",
+                "  model_name: all-MiniLM-L6-v2\n",
+                "  batch_size: 4096\n",
+                "  device: cuda\n",
+                "\n",
+                "faiss:\n",
+                "  use_gpu: true\n",
+                "  nlist: 4096\n",
+                "  nprobe: 128\n",
+                "\n",
+                "processing:\n",
+                "  feature_chunk_size: 500000\n",
+                "\n",
+                "tiers:\n",
+                "  tier_a_threshold: 0.95\n",
+                "  tier_b_threshold: 0.80\n",
+                "  tier_c_threshold: 0.60\n",
+                "\n",
+                "model:\n",
+                "  classifier: gradient_boosting\n",
+                "  n_estimators: 200\n",
+                "  max_depth: 8\n",
+                "  learning_rate: 0.1\n",
+                "'''\n",
+                "\n",
+                "import os\n",
+                "os.makedirs('configs', exist_ok=True)\n",
+                "with open('configs/a100_colab.yaml', 'w') as f:\n",
+                "    f.write(a100_config)\n",
+                "\n",
+                "print('✅ Created configs/a100_colab.yaml')"
+            ]
+        },
+        {
+            "cell_type": "code",
+            "execution_count": None,
+            "metadata": {},
+            "outputs": [],
+            "source": [
+                "#@title Cell 6: Run Full Pipeline 🚀\n",
+                "import time\n",
+                "start_time = time.time()\n",
+                "\n",
+                "print('='*60)\n",
+                "print('STARTING ENTITY RESOLUTION PIPELINE (A100 OPTIMIZED)')\n",
+                "print('='*60)\n",
+                "\n",
+                "!python run_pipeline.py --step all --config configs/a100_colab.yaml\n",
+                "\n",
+                "elapsed = time.time() - start_time\n",
+                "print('\\n' + '='*60)\n",
+                "print(f'🎉 PIPELINE COMPLETED in {elapsed/60:.1f} minutes')\n",
+                "print('='*60)"
+            ]
+        },
+        {
+            "cell_type": "code",
+            "execution_count": None,
+            "metadata": {},
+            "outputs": [],
+            "source": [
+                "#@title Cell 7: View Results\n",
+                "import pandas as pd\n",
+                "import os\n",
+                "\n",
+                "outputs = {\n",
+                "    'matches': 'data/outputs/matches/matches_final.parquet',\n",
+                "    'review_queue': 'data/outputs/review/review_queue.csv',\n",
+                "    'cb_clean': 'data/interim/cb_clean/cb_clean.parquet',\n",
+                "    'orbis_clean': 'data/interim/orbis_clean/orbis_clean.parquet',\n",
+                "}\n",
+                "\n",
+                "print('📊 Output Files:')\n",
+                "for name, path in outputs.items():\n",
+                "    if os.path.exists(path):\n",
+                "        size = os.path.getsize(path) / 1e6\n",
+                "        print(f'  ✅ {name}: {path} ({size:.1f} MB)')\n",
+                "    else:\n",
+                "        print(f'  ❌ {name}: Not found')\n",
+                "\n",
+                "if os.path.exists(outputs['matches']):\n",
+                "    matches = pd.read_parquet(outputs['matches'])\n",
+                "    print(f'\\n📈 Total matches: {len(matches)}')\n",
+                "    print(matches['tier'].value_counts())\n",
+                "    display(matches.head(10))"
+            ]
+        },
+        {
+            "cell_type": "code",
+            "execution_count": None,
+            "metadata": {},
+            "outputs": [],
+            "source": [
+                "#@title Cell 8: Download Results\n",
+                "import shutil\n",
+                "\n",
+                "output_dir = 'data/outputs'\n",
+                "if os.path.exists(output_dir):\n",
+                "    shutil.make_archive('/content/pipeline_results', 'zip', output_dir)\n",
+                "    print('📦 Created pipeline_results.zip')\n",
+                "    print(f'\\n✅ Results saved to Drive at: {PIPELINE_PATH}/data/outputs/')\n",
+                "else:\n",
+                "    print('❌ No outputs found')"
+            ]
+        }
+    ],
+    "metadata": {
+        "accelerator": "GPU",
+        "colab": {"gpuType": "A100", "machine_shape": "hm"},
+        "kernelspec": {"display_name": "Python 3", "name": "python3"}
+    },
+    "nbformat": 4,
+    "nbformat_minor": 0
+}
+
+# Write the notebook
+output_path = "notebooks/entity_resolution_a100_fixed.ipynb"
+with open(output_path, 'w') as f:
+    json.dump(notebook, f, indent=2)
+
+print(f"✅ Created {output_path}")
+print("Upload this notebook to Google Colab!")
