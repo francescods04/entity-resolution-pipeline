@@ -1,0 +1,34 @@
+# Data files (too large for git)
+data/interim/
+data/outputs/
+data/raw/
+data/models/
+*.parquet
+*.npy
+*.pkl
+
+# Excel files
+*.xlsx
+*.xls
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.ipynb_checkpoints/
+*.egg-info/
+
+# Mac
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+
+# Logs
+*.log
+logs/
+
+# Virtual env
+venv/
+.env

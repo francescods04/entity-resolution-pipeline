@@ -1,0 +1,48 @@
+# Local Mac Configuration
+# Use this when running on your laptop
+
+paths:
+  project_root: /Users/francescodelsesto/Downloads/ricerca/entity-resolution-pipeline
+  # Validated local paths
+  raw_crunchbase: /Users/francescodelsesto/Downloads/ricerca/dati europe cb
+  raw_orbis: /Users/francescodelsesto/Downloads/ricerca/new orbis
+
+# Blocking configuration
+blocking:
+  MAX_CANDIDATES_PER_CB: 300
+  rare_token_df_threshold: 1000
+
+# Embedding configuration
+# GREAT NEWS: Your M1 Mac has a GPU (Neural Engine).
+# We use 'mps' (Metal Performance Shaders) to accelerate this.
+embeddings:
+  enabled: true  # Enabled for M1/M2
+  model_name: all-MiniLM-L6-v2
+  batch_size: 64 # M1 can handle this
+  device: mps    # Use Apple Silicon GPU!
+
+# FAISS configuration
+faiss:
+  use_gpu: false # FAISS on Mac GPU is tricky, keep CPU (it's fast enough for 2M)
+  nprobe: 16
+
+# Tiers and Features
+tiers:
+  A: 0.98
+  B: 0.93
+  C: 0.75
+
+features:
+  enable_investor_checks: true
+  enable_semantic_embeddings: true # Enabled (M1 GPU acceleration)
+  enable_family_expansion: true
+
+model:
+  type: gradient_boosting
+  n_estimators: 100
+  max_depth: 6
+  learning_rate: 0.1
+
+logging:
+  level: INFO
+  save_timing: true
