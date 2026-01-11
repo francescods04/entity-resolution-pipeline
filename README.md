@@ -1,102 +1,97 @@
-# Entity Resolution Pipeline: Crunchbase ↔ Orbis
+# Entity Resolution Pipeline
 
-**PhD-Level Company Matching System for European VC-Backed Startups**
+Matching Crunchbase startups to their Orbis corporate records.
 
-## Overview
+## What This Does
 
-This project implements a state-of-the-art entity resolution pipeline to match **Crunchbase startup data** with **Orbis corporate records** from Bureau van Dijk. The system uses multi-source candidate blocking, GPU-accelerated embeddings, and machine learning with weak supervision.
+If you've ever tried to connect startup data from Crunchbase with Bureau van Dijk's Orbis database, you know it's a nightmare. Company names don't match, legal entities differ from trading names, and there are millions of potential false positives.
 
-## Quick Start
+This pipeline solves that. It takes ~19,000 European VC-backed companies from Crunchbase and finds their corresponding records among ~16 million Orbis companies. The result? Accurate matches with confidence scores, ready for your research.
 
-### Prerequisites
+## Getting Started
 
-- Python 3.10+
-- Google Colab Pro (A100 GPU recommended)
-- ~50GB storage for raw + processed data
+### On Google Colab (Recommended)
 
-### Installation
+The fastest way to run this is on Colab with a GPU. Just paste this in a cell:
+
+```python
+!pip install -q polars[calamine] pyarrow tqdm sentence-transformers rapidfuzz faiss-cpu
+
+from google.colab import drive
+drive.mount('/content/drive')
+
+# Point this to wherever you stored the pipeline
+%run "/content/drive/MyDrive/entity-resolution-pipeline/COLAB_A100_TURBO.py"
+```
+
+It takes about 30-40 minutes on an A100.
+
+### Running Locally
+
+If you prefer running on your own machine:
 
 ```bash
 pip install -r requirements.txt
+python run_pipeline.py --config configs/local.yaml
 ```
 
-## Key Features
+Expect 60-90 minutes on an M1 Mac or similar.
 
-*   **PhD-Level Methodology**:
-    *   **Learned Disambiguation**: Replaces heuristics with Logistic Regression trained on platinum matches.
-    *   **Rigorous Evaluation**: Stratified sampling, hard-negative mining, and Wilson score confidence intervals.
-    *   **Detailed Ablation Studies**: Automated framework to justify feature contributions.
+## How It Works
 
-*   **Advanced Matching**:
-    *   **Multi-Source Blocking**: Uses `database-done.xlsx` aliases (Manual/AI) to find companies with different legal names.
-    *   **Robust Data Ingestion**: Handles varying Crunchbase CSV schemas and "messy" Orbis batches.
-    *   **Deep Semantic Matching**: (Optional) GPU-accelerated embedding search.
+The pipeline runs through several stages:
 
-## Usage
+1. **Normalize** — Cleans company names, extracts domains, standardizes formats
+2. **Block** — Finds candidate pairs using multiple strategies (domain match, name similarity, embeddings)
+3. **Score** — Computes features and runs them through a trained model
+4. **Decide** — Assigns confidence tiers (A/B/C) or rejects
 
-### 1. Optimize Data
-Combine dispersed Orbis Excel files into a high-performance Parquet file:
-```bash
-python process_orbis_batch.py --input "../new orbis" --output data/raw/orbis_merged.parquet
-```
+The key insight is that we use your existing manual matches (from `database-done.xlsx`) to train the model. The more platinum matches you have, the better it performs.
 
-### 2. Run Pipeline
-Execute the full matching pipeline. It automatically detects and uses your platinum matches for training.
-```bash
-python run_pipeline.py --config configs/colab_gpu.yaml
-```
+## What You Need
 
-### 3. Analyze Results
-Generate research-grade reports and ablation tables:
-```bash
-python run_pipeline.py --step analytics
-```
+**Data:**
+- Crunchbase export (CSV files in `dati europe cb/`)
+- Orbis batch exports (Excel files in `new orbis/`)
+- Your manual matches (optional but recommended: `database-done.xlsx`)
 
-## Documentation
-*   [**PhD Methodology**](docs/PHD_METHODOLOGY_IMPROVEMENTS.md): Scientific justification of the pipeline's innovative features (Learned Disambiguation, AI-Augmented Indices).
-*   [**Data Dictionary**](docs/DATA_DICTIONARY.md): Detailed schema of `database-done.xlsx` (Platinum Matches, AI Aliases) and input files.
-*   [**Operations Guide**](docs/WORKFLOW_RUN_PIPELINE.md): Step-by-step commands to run the pipeline.
-
-## Data Sources
-
-| Source | Location | Records |
-|--------|----------|---------|
-| Crunchbase | `dati europe cb/` | ~19K companies |
-| Orbis | `new orbis/` | ~15M companies (944 files × 16K each) |
-
-## Key Features
-
-- **Multi-Source Blocking**: Domain matching, ANN embeddings, token overlap
-- **GPU Acceleration**: FAISS + SentenceTransformers on A100
-- **Corporate Graph**: Orbis SUB/SH/GUO/BRANCH relationship handling
-- **Tiered Decisioning**: A (auto) / B (high) / C (review) / Reject
-- **Evidence Tracking**: JSON explanations for every match
+**Hardware:**
+- 16GB+ RAM for local runs
+- GPU for faster embeddings (optional but helps a lot)
 
 ## Output
 
-| File | Description |
+After running, you'll find:
+
+| File | What's in it |
 |------|-------------|
-| `matches_final.parquet` | Final matches with tiers |
-| `review_queue.csv` | Human review candidates |
-| `quality_report.html` | Metrics dashboard |
+| `matches_final.parquet` | All matches with confidence tiers |
+| `review_queue.csv` | Borderline cases that need human review |
+| `run_manifest.json` | Stats and metadata from the run |
 
-## Documentation
-
-- [Methodology](docs/METHODOLOGY.md) - Academic approach description
-- [Data Dictionary](docs/DATA_DICTIONARY.md) - Schema documentation
-- [Quality Metrics](docs/QUALITY_METRICS.md) - Precision/recall analysis
-
-## Project Structure
+## Project Layout
 
 ```
 entity-resolution-pipeline/
-├── data/                    # Raw, interim, outputs
-├── src/                     # Python modules
-├── notebooks/               # Colab notebooks (00-09)
-├── configs/                 # YAML configurations
-└── docs/                    # Academic documentation
+├── src/                 # All the matching logic
+├── configs/             # Settings for local vs GPU runs
+├── docs/                # Methodology notes
+├── COLAB_A100_TURBO.py  # One-click Colab script
+└── run_pipeline.py      # Main entry point
 ```
 
-## License
+## Docs
 
-For academic research purposes only.
+If you want to dig deeper:
+
+- [Methodology](docs/METHODOLOGY.md) — The academic approach behind this
+- [Data Dictionary](docs/DATA_DICTIONARY.md) — What each column means
+- [Running the Pipeline](docs/WORKFLOW_RUN_PIPELINE.md) — Step-by-step guide
+
+## Questions?
+
+This was built for PhD research on European startups and corporate governance. If you're using it for something similar and run into issues, the code is reasonably well-commented.
+
+---
+
+*For academic research purposes.*
