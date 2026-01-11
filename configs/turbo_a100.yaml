@@ -1,0 +1,51 @@
+blocking:
+  ANN_TOPK_DESC: 50
+  ANN_TOPK_NAME: 100
+  MAX_CANDIDATES_PER_CB: 300
+  rare_token_df_threshold: 1000
+embeddings:
+  batch_size: 8192
+  device: cuda
+  dtype: float16
+  enabled: true
+  model_name: all-MiniLM-L6-v2
+  streaming_chunk_size: 1000000
+  use_streaming: true
+faiss:
+  metric: inner_product
+  nprobe: 16
+  use_gpu: false
+features:
+  enable_family_expansion: true
+  enable_investor_checks: true
+  enable_semantic_embeddings: true
+  parallel_workers: 8
+logging:
+  level: INFO
+  memory_warnings_threshold_gb: 30
+  save_timing: true
+model:
+  calibration: isotonic
+  learning_rate: 0.1
+  max_depth: 6
+  n_estimators: 200
+  type: gradient_boosting
+paths:
+  project_root: /content/drive/Othercomputers/My MacBook Pro/Downloads/ricerca/entity-resolution-pipeline
+  raw_crunchbase: /content/drive/Othercomputers/My MacBook Pro/Downloads/ricerca/dati
+    europe cb
+  raw_orbis: /content/drive/Othercomputers/My MacBook Pro/Downloads/ricerca/new orbis
+random_seed: 42
+reranking:
+  enabled: true
+  max_score: 0.95
+  min_score: 0.4
+  model_name: cross-encoder/ms-marco-MiniLM-L-6-v2
+semantic_blocking:
+  enabled: true
+  similarity_threshold: 0.7
+  top_k: 50
+tiers:
+  A: 0.98
+  B: 0.93
+  C: 0.75
