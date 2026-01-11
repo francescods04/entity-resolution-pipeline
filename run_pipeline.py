@@ -732,7 +732,9 @@ def step_embeddings(config: Config, paths: Dict, logger: logging.Logger) -> None
             orbis_data=orbis_data,
             output_dir=str(embeddings_dir),
             model_name=config.get('embeddings.model_name', 'all-MiniLM-L6-v2'),
-            batch_size=config.get('embeddings.batch_size', 512)
+            batch_size=config.get('embeddings.batch_size', 4096),
+            use_streaming=config.get('embeddings.use_streaming', True),
+            streaming_chunk_size=config.get('embeddings.streaming_chunk_size', 500000),
         )
         
         # Build FAISS (Optional, good for advanced blocking)

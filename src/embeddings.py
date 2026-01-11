@@ -161,12 +161,13 @@ def compute_embeddings_streaming(
         chunk_texts = texts[start_idx:end_idx]
         clean_chunk = [str(t) if pd.notna(t) and t else '' for t in chunk_texts]
         
-        # Encode chunk
+        # Encode chunk - maximize GPU utilization
         chunk_embeddings = model.encode(
             clean_chunk,
             batch_size=batch_size,
             show_progress_bar=True,
             convert_to_numpy=True,
+            normalize_embeddings=True,  # L2 normalize for cosine sim
         )
         
         # Write directly to memmap (on disk)
