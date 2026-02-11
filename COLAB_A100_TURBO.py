@@ -28,7 +28,7 @@ try:
     print("  ✅ All packages already installed")
 except ImportError as e:
     print(f"  ⚠ Missing package: {e}")
-    print("  Run this first: !pip install -q polars[calamine] pyarrow tqdm sentence-transformers rapidfuzz faiss-cpu")
+    print("  Run this first: !pip install -q polars[calamine] pyarrow tqdm sentence-transformers rapidfuzz faiss-cpu joblib")
 
 # Verify GPU
 import torch
@@ -42,15 +42,65 @@ else:
 # STEP 2: OPTIMIZED CONFIG FOR A100
 # =============================================================================
 
-# Paths
-DRIVE_BASE = "/content/drive/Othercomputers/My MacBook Pro/Downloads/ricerca"
+# =============================================================================
+# PATH DETECTION (Auto-detect your Drive structure)
+# =============================================================================
+from pathlib import Path
+
+# Try to auto-detect Drive base path
+POSSIBLE_BASES = [
+    "/content/drive/Othercomputers/My MacBook Pro/Downloads/ricerca",
+    "/content/drive/MyDrive/ricerca",
+    "/content/drive/My Drive/ricerca",
+]
+
+DRIVE_BASE = None
+for base in POSSIBLE_BASES:
+    if os.path.exists(base):
+        DRIVE_BASE = base
+        break
+
+if DRIVE_BASE is None:
+    # Fallback: find it dynamically
+    drive_root = Path("/content/drive")
+    for p in drive_root.rglob("entity-resolution-pipeline"):
+        if p.is_dir() and (p / "run_pipeline.py").exists():
+            DRIVE_BASE = str(p.parent)
+            break
+
+if DRIVE_BASE is None:
+    raise FileNotFoundError("Could not find 'ricerca' folder in Google Drive. Please check your Drive is mounted.")
+
+print(f"📁 Found Drive base: {DRIVE_BASE}")
+
 LOCAL_PIPELINE = "/content/local_pipeline/entity-resolution-pipeline"
 LOCAL_CB = "/content/local_pipeline/cb_data"
 LOCAL_ORBIS = "/content/orbis_local"
 
+# Detect GPU type for optimal batch sizes
+import torch
+gpu_name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else ""
+gpu_vram = torch.cuda.get_device_properties(0).total_memory / 1e9 if torch.cuda.is_available() else 0
+
+# Adjust batch sizes based on GPU
+if "A100" in gpu_name:
+    BATCH_SIZE = 2048
+    CHUNK_SIZE = 200000
+    USE_GPU_FAISS = True
+elif "L4" in gpu_name or gpu_vram >= 20:
+    BATCH_SIZE = 1024  # L4 has 24GB - good middle ground
+    CHUNK_SIZE = 150000
+    USE_GPU_FAISS = False  # L4 FAISS-GPU can be unstable
+else:  # T4 or smaller
+    BATCH_SIZE = 512
+    CHUNK_SIZE = 100000
+    USE_GPU_FAISS = False
+
+print(f"⚙️  Optimizing for {gpu_name} ({gpu_vram:.1f}GB): batch_size={BATCH_SIZE}")
+
 # Create optimized config
 A100_CONFIG = f"""
-# A100 80GB TURBO CONFIG
+# GPU-OPTIMIZED CONFIG (auto-detected: {gpu_name})
 
 paths:
   project_root: {LOCAL_PIPELINE}
@@ -58,53 +108,53 @@ paths:
   raw_orbis: {LOCAL_ORBIS}
 
 embeddings:
-  batch_size: 2048          # 4x larger for A100 (vs 512)
+  batch_size: {BATCH_SIZE}
   device: cuda
   dtype: float16
   enabled: true
-  model_name: BAAI/bge-large-en-v1.5
-  streaming_chunk_size: 200000  # 4x larger chunks
+  model_name: all-MiniLM-L6-v2
+  streaming_chunk_size: {CHUNK_SIZE}
   use_streaming: true
 
 blocking:
   ANN_TOPK_DESC: 100
-  ANN_TOPK_NAME: 200        # 2x more candidates
+  ANN_TOPK_NAME: 200
   MAX_CANDIDATES_PER_CB: 500
   rare_token_df_threshold: 1000
 
 faiss:
   metric: inner_product
-  nprobe: 32                # 2x more probes for accuracy
-  use_gpu: true             # GPU FAISS!
+  nprobe: 32
+  use_gpu: {str(USE_GPU_FAISS).lower()}
 
 features:
   enable_family_expansion: true
   enable_investor_checks: true
   enable_semantic_embeddings: true
-  parallel_workers: 16      # 2x workers
+  parallel_workers: 8
 
 logging:
   level: INFO
-  memory_warnings_threshold_gb: 100
+  memory_warnings_threshold_gb: 50
   save_timing: true
 
 model:
   calibration: isotonic
   learning_rate: 0.1
   max_depth: 8
-  n_estimators: 500         # 2.5x more trees
+  n_estimators: 500
   type: gradient_boosting
 
 processing:
-  chunk_size: 200000        # 4x larger chunks
-  feature_chunk_size: 200000
+  chunk_size: {CHUNK_SIZE}
+  feature_chunk_size: {CHUNK_SIZE}
 
 reranking:
   enabled: true
   max_score: 0.95
   min_score: 0.4
   model_name: cross-encoder/ms-marco-MiniLM-L-6-v2
-  batch_size: 256           # GPU reranking
+  batch_size: 128
 
 random_seed: 42
 
@@ -123,30 +173,64 @@ os.makedirs(f"{LOCAL_PIPELINE}/configs", exist_ok=True)
 config_path = f"{LOCAL_PIPELINE}/configs/a100_turbo.yaml"
 with open(config_path, 'w') as f:
     f.write(A100_CONFIG)
-print(f"\n✅ Created A100-optimized config: {config_path}")
+print(f"✅ Created GPU-optimized config: {config_path}")
 
 # =============================================================================
-# STEP 3: FAST DATA SETUP (skip if exists)
+# STEP 3: FAST DATA SETUP with INTEGRITY VALIDATION
 # =============================================================================
 print("\n📂 Setting up local data...")
 
 import shutil
-from pathlib import Path
 
-# Copy pipeline code
+# Full copy if directory doesn't exist
 if not os.path.exists(LOCAL_PIPELINE):
-    print("  Copying pipeline code...")
+    print("  Copying pipeline code (first run)...")
     shutil.copytree(f"{DRIVE_BASE}/entity-resolution-pipeline", LOCAL_PIPELINE)
+else:
+    # ALWAYS re-sync src/ and run_pipeline.py from Drive to pick up bug fixes
+    # This is fast (~2s for small Python files) and prevents stale code issues
+    print("  🔄 Syncing code from Drive (ensures latest fixes)...")
+    src_local = f"{LOCAL_PIPELINE}/src"
+    if os.path.exists(src_local):
+        shutil.rmtree(src_local)
+    shutil.copytree(f"{DRIVE_BASE}/entity-resolution-pipeline/src", src_local)
+    shutil.copy(f"{DRIVE_BASE}/entity-resolution-pipeline/run_pipeline.py", f"{LOCAL_PIPELINE}/run_pipeline.py")
+    # Also sync configs
+    configs_drive = f"{DRIVE_BASE}/entity-resolution-pipeline/configs"
+    if os.path.exists(configs_drive):
+        configs_local = f"{LOCAL_PIPELINE}/configs"
+        if os.path.exists(configs_local):
+            shutil.rmtree(configs_local)
+        shutil.copytree(configs_drive, configs_local)
+    print("    ✓ src/ + run_pipeline.py synced")
 
 # Copy CB data
 if not os.path.exists(LOCAL_CB):
     print("  Copying Crunchbase data...")
     shutil.copytree(f"{DRIVE_BASE}/dati europe cb", LOCAL_CB)
 
-# Copy database-done.xlsx
+# Copy database-done.xlsx - check multiple possible locations
 DB_DONE = "/content/local_pipeline/database-done.xlsx"
 if not os.path.exists(DB_DONE):
-    shutil.copy2(f"{DRIVE_BASE}/database-done.xlsx", DB_DONE)
+    # Try multiple possible locations
+    possible_db_paths = [
+        f"{DRIVE_BASE}/entity-resolution-pipeline/database-done.xlsx",
+        f"{DRIVE_BASE}/database-done.xlsx",
+        f"{LOCAL_PIPELINE}/database-done.xlsx",
+    ]
+    
+    db_source = None
+    for path in possible_db_paths:
+        if os.path.exists(path):
+            db_source = path
+            break
+    
+    if db_source:
+        print(f"  Found database-done.xlsx at: {db_source}")
+        shutil.copy2(db_source, DB_DONE)
+    else:
+        print("  ⚠️  database-done.xlsx not found - pipeline will train without platinum labels")
+        print(f"     Searched: {possible_db_paths}")
 
 # Check Orbis data
 orbis_raw = f"{LOCAL_PIPELINE}/data/interim/orbis_clean/orbis_raw.parquet"
@@ -177,6 +261,8 @@ if not os.path.exists(orbis_raw):
         'Company name Latin alphabet': 'orbis_name',
         'Country ISO code': 'orbis_country',
         'City': 'orbis_city',
+        'City (Latin Alphabet)': 'orbis_city',       # New export variant
+        'City\nLatin Alphabet': 'orbis_city',         # Newline variant
         'Postcode': 'orbis_postcode',
         'Website address': 'orbis_website',
         'E-mail address': 'orbis_email',
@@ -230,15 +316,20 @@ if not os.path.exists(orbis_raw):
         return result
     
     all_dfs = []
+    failed_files = []
     with ThreadPoolExecutor(max_workers=16) as ex:
         futures = {ex.submit(process_file, f): f for f in orbis_files}
         for future in tqdm(as_completed(futures), total=len(orbis_files), desc="Processing"):
+            filepath = futures[future]
             try:
                 df = future.result(timeout=60)
                 if df is not None and not df.is_empty():
                     all_dfs.append(df)
-            except:
-                pass
+            except Exception as e:
+                failed_files.append((filepath.name, str(e)[:50]))
+    
+    if failed_files:
+        print(f"  ⚠️ {len(failed_files)} files failed: {failed_files[:5]}...")
     
     final_df = pl.concat(all_dfs).unique(subset=["bvd_id"], keep="first")
     for col in ALL_COLS:
@@ -258,7 +349,9 @@ print("✅ Data ready")
 print("\n🔥 RUNNING PIPELINE WITH A100 GPU...")
 
 os.chdir(LOCAL_PIPELINE)
+# Add BOTH paths: local (fast) and Drive (fallback if copy incomplete)
 sys.path.insert(0, f"{LOCAL_PIPELINE}/src")
+sys.path.insert(0, f"{DRIVE_BASE}/entity-resolution-pipeline/src")  # Fallback
 
 # GPU-accelerated normalize (inline for speed)
 orbis_clean = f"{LOCAL_PIPELINE}/data/interim/orbis_clean/orbis_clean.parquet"
@@ -299,21 +392,70 @@ if not os.path.exists(orbis_clean):
     
     orbis.to_parquet(orbis_clean, index=False)
     print(f"  ✅ Saved orbis_clean.parquet ({os.path.getsize(orbis_clean)/(1024**3):.2f} GB)")
+    
+    # FREE MEMORY: Release ~2.2 GB before subprocess steps begin
+    del orbis, name_features, domain_features, first_websites, date_col, is_numeric, numeric_dates, parsed_dates
+    import gc; gc.collect()
+    print("  🧹 Memory released after inline normalize")
 
 # Run remaining steps with A100 config
-STEPS = ['alias', 'index', 'embeddings', 'blocking', 'features', 'train', 'score', 'rerank', 'decide', 'report', 'analytics']
+# NOTE: 'ingest' creates cb_raw_companies.parquet (Orbis already ingested inline above)
+# NOTE: 'normalize' creates cb_clean.parquet (Orbis already normalized inline above)
+STEPS = ['ingest', 'normalize', 'alias', 'index', 'embeddings', 'blocking', 'features', 'train', 'score', 'rerank', 'decide', 'report', 'analytics']
 
-for step in STEPS:
+# =============================================================================
+# SMART RESUME: Check checkpoint file to skip completed steps
+# =============================================================================
+import json
+checkpoint_file = f"{LOCAL_PIPELINE}/data/interim/pipeline_checkpoint.json"
+completed_steps = set()
+
+if os.path.exists(checkpoint_file):
+    try:
+        with open(checkpoint_file, 'r') as f:
+            checkpoint_data = json.load(f)
+            completed_steps = set(checkpoint_data.get('completed_steps', []))
+            last_step = checkpoint_data.get('last_step', 'unknown')
+            timestamp = checkpoint_data.get('timestamp', 'unknown')
+            print(f"\n🔄 RESUME MODE DETECTED")
+            print(f"   Last checkpoint: {last_step} at {timestamp}")
+            print(f"   Completed steps: {', '.join(sorted(completed_steps))}")
+    except Exception as e:
+        print(f"⚠️  Could not read checkpoint: {e}, starting fresh")
+
+# Filter out already-completed steps
+steps_to_run = [s for s in STEPS if s not in completed_steps]
+
+if len(steps_to_run) < len(STEPS):
+    skipped = len(STEPS) - len(steps_to_run)
+    print(f"   ⏭️  Skipping {skipped} completed steps")
+    print(f"   ▶️  Will run: {', '.join(steps_to_run)}")
+else:
+    print(f"\n▶️  Running all {len(STEPS)} steps (no checkpoint found)")
+
+for step in steps_to_run:
     print(f"\n{'='*60}")
     print(f"▶ {step.upper()}")
     print('='*60, flush=True)
     
     start = time.time()
+    run_script = f"{LOCAL_PIPELINE}/run_pipeline.py"
+    
+    # Throttle tqdm output to prevent Colab browser freeze
+    env = os.environ.copy()
+    env['TQDM_MININTERVAL'] = '30'  # Update at most every 30 seconds
+    env['TQDM_DISABLE'] = '0'
+    
     process = subprocess.Popen(
-        ['python', '-u', 'run_pipeline.py', '--config', config_path, '--step', step],
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1
+        ['python', '-u', run_script, '--config', config_path, '--step', step],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
+        cwd=LOCAL_PIPELINE,
+        env=env
     )
     for line in process.stdout:
+        # Filter out tqdm carriage-return spam (lines with \r but no \n)
+        if '\r' in line and line.strip().endswith('%|'):
+            continue
         print(line, end='', flush=True)
     process.wait()
     
@@ -331,6 +473,7 @@ for step in STEPS:
         f"{LOCAL_PIPELINE}/data/interim/candidates/candidates.parquet",
         f"{LOCAL_PIPELINE}/data/interim/features/pair_features.parquet",
         f"{LOCAL_PIPELINE}/data/outputs/matches/matches_final.parquet",
+        f"{LOCAL_PIPELINE}/data/interim/pipeline_checkpoint.json",
     ]:
         if os.path.exists(src):
             dst = src.replace(LOCAL_PIPELINE, f"{DRIVE_BASE}/entity-resolution-pipeline")

@@ -133,20 +133,171 @@ def extract_manual_matches(file_path: str) -> pd.DataFrame:
     """
     Extract manually verified matches from Sheet 5 "Matching manuale".
     
-    Only 314 have actual company name matches.
+    P3 FIX: The 'company name' column contains verbose text like:
+      "WOODFLOW TECHNOLOGIES S.L., registered in Madrid, Spain."
+    We parse out the actual legal name by splitting at known phrase boundaries.
+    This recovers ~4,464 matches (was 314 due to overly strict filtering).
     """
     df = pd.read_excel(file_path, sheet_name="Matching manuale")
     
     result = pd.DataFrame({
         'domain': df['dominio'],
         'cb_name': df['name '],
-        'legal_name': df['company name'],
+        'legal_name_raw': df['company name'],
     })
     
     # Only rows with actual company names
-    result = result[result['legal_name'].notna()]
+    result = result[result['legal_name_raw'].notna()]
     
-    logger.info(f"Extracted {len(result)} manual matches")
+    # Parse verbose text → clean legal name
+    import re
+    
+    def _parse_legal_name(raw: str) -> str:
+        """Extract legal name from verbose description."""
+        raw = str(raw).strip()
+        if not raw:
+            return ''
+        # Split at known phrase boundaries
+        # e.g. "WOODFLOW TECHNOLOGIES S.L., registered in Madrid, Spain."
+        for sep in [', registered', ', based', ', founded', ', headquartered',
+                    ', incorporated', ', located', ', operating', '. The company',
+                    '. It ', '. Founded', '. Based']:
+            if sep.lower() in raw.lower():
+                idx = raw.lower().index(sep.lower())
+                raw = raw[:idx]
+                break
+        # Also trim trailing ", [Country]" pattern (e.g. ", Spain")
+        raw = re.sub(r',\s*[A-Z][a-z]+\.?$', '', raw)
+        return raw.strip().rstrip('.,')
+    
+    result['legal_name'] = result['legal_name_raw'].apply(_parse_legal_name)
+    result = result[result['legal_name'].str.len() > 1]
+    result = result.drop(columns=['legal_name_raw'])
+    
+    logger.info(f"Extracted {len(result)} manual matches (P3: verbose text parsed)")
+    return result
+
+
+def extract_deal_metadata(file_path: str) -> pd.DataFrame:
+    """
+    P1: Extract comprehensive metadata from Sheet 7 "Deal".
+    
+    32,928 funding rounds → deduplicated to ~12K unique companies.
+    100% fill on: Organization Industries, Description, Location.
+    
+    Returns DataFrame with:
+    - cb_name: Organization Name
+    - cb_industries: pipe-separated industry list
+    - cb_description: company description
+    - cb_location: full location string
+    - cb_country_parsed: extracted country
+    - cb_city_parsed: extracted city
+    - cb_total_funding_usd: total funding amount
+    - cb_num_rounds: number of funding rounds
+    - cb_revenue_range: revenue range if available
+    """
+    df = pd.read_excel(file_path, sheet_name="Deal")
+    
+    # Core columns (names from typical CB export)
+    col_map = {
+        'Organization Name': 'cb_name',
+        'Organization Industries': 'cb_industries',
+        'Organization Description': 'cb_description',
+        'Organization Location': 'cb_location',
+        'Money Raised': 'money_raised',
+        'Organization Revenue Range': 'cb_revenue_range',
+    }
+    
+    # Map available columns
+    available = {}
+    for src, dst in col_map.items():
+        if src in df.columns:
+            available[dst] = df[src]
+        else:
+            # Try case-insensitive match
+            for c in df.columns:
+                if c.strip().lower() == src.lower():
+                    available[dst] = df[c]
+                    break
+    
+    if 'cb_name' not in available:
+        logger.warning("Deal sheet: 'Organization Name' column not found")
+        return pd.DataFrame()
+    
+    result = pd.DataFrame(available)
+    
+    # Deduplicate by company name — aggregate per company
+    agg_funcs = {
+        'cb_industries': 'first',
+        'cb_description': 'first',
+        'cb_location': 'first',
+        'cb_revenue_range': 'first',
+    }
+    # Only aggregate columns that exist
+    agg_funcs = {k: v for k, v in agg_funcs.items() if k in result.columns}
+    
+    if 'money_raised' in result.columns:
+        agg_funcs['money_raised'] = 'sum'
+    
+    # Count rounds
+    result['_round'] = 1
+    agg_funcs['_round'] = 'sum'
+    
+    grouped = result.groupby('cb_name', as_index=False).agg(agg_funcs)
+    grouped = grouped.rename(columns={
+        '_round': 'cb_num_rounds',
+        'money_raised': 'cb_total_funding_usd',
+    })
+    
+    # Parse location → country, city
+    if 'cb_location' in grouped.columns:
+        # Location format: "City, Region, Country" or "City, Country"
+        loc = grouped['cb_location'].fillna('').astype(str)
+        parts = loc.str.rsplit(',', n=1)
+        grouped['cb_country_parsed'] = parts.str[-1].str.strip()
+        grouped['cb_city_parsed'] = loc.str.split(',').str[0].str.strip()
+    
+    logger.info(f"Extracted Deal metadata: {len(grouped)} unique companies "
+                f"from {len(df)} funding rounds")
+    if 'cb_industries' in grouped.columns:
+        logger.info(f"  With industries: {grouped['cb_industries'].notna().sum()}")
+    if 'cb_description' in grouped.columns:
+        logger.info(f"  With descriptions: {grouped['cb_description'].notna().sum()}")
+    
+    return grouped
+
+
+def get_silver_label_pairs(file_path: str) -> pd.DataFrame:
+    """
+    P2: Extract silver-label training pairs from Sheet 2 "bvd id".
+    
+    5,823 confirmed CB name → Orbis legal name mappings.
+    Currently only used for alias blocking — NOT as training positives.
+    
+    Returns DataFrame with:
+    - cb_name: CB brand name
+    - orbis_name: Orbis legal name
+    - cb_website: CB website
+    - source: 'silver_sheet2'
+    - confidence: 0.85
+    """
+    df = pd.read_excel(file_path, sheet_name="bvd id")
+    
+    result = pd.DataFrame({
+        'cb_name': df['company name'],
+        'orbis_name': df['legal name'],
+        'cb_website': df['website'],
+        'source': 'silver_sheet2',
+        'confidence': 0.85,
+    })
+    
+    result = result.dropna(subset=['cb_name', 'orbis_name'])
+    # Filter out placeholder values
+    result = result[
+        ~result['orbis_name'].str.lower().isin(['n/a', 'na', '-', 'unknown', 'none', ''])
+    ]
+    
+    logger.info(f"Extracted {len(result)} silver training label pairs from Sheet 2")
     return result
 
 
@@ -303,6 +454,20 @@ def get_all_prematched_pairs(file_path: str) -> pd.DataFrame:
             })
     except Exception as e:
         logger.warning(f"Failed to load manual matches: {e}")
+    
+    # Source 3: Silver labels from Sheet 2 (P2)
+    try:
+        silver = get_silver_label_pairs(file_path)
+        for _, row in silver.iterrows():
+            all_pairs.append({
+                'cb_name': row['cb_name'],
+                'cb_domain': row.get('cb_website', ''),
+                'orbis_name': row['orbis_name'],
+                'source': 'silver_sheet2',
+                'confidence': 0.85,
+            })
+    except Exception as e:
+        logger.warning(f"Failed to load silver labels: {e}")
     
     result = pd.DataFrame(all_pairs)
     

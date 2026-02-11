@@ -573,6 +573,74 @@ def compute_disambiguation_score(
 
 
 # =============================================================================
+# INDUSTRY & DESCRIPTION OVERLAP (P1: Deal sheet exploitation)
+# =============================================================================
+
+def industry_token_overlap(cb_industries: str, orbis_trade_desc: str) -> float:
+    """
+    Token Jaccard between CB industry keywords and Orbis trade description.
+    
+    CB industries: pipe-separated (e.g., "Software|SaaS|Cloud Computing")
+    Orbis trade desc: free text (e.g., "Development of cloud software solutions")
+    """
+    if not cb_industries or not orbis_trade_desc:
+        return 0.0
+    if pd.isna(cb_industries) or pd.isna(orbis_trade_desc):
+        return 0.0
+    
+    # Tokenize CB industries (split on pipe, then tokenize each)
+    cb_tokens = set()
+    for industry in str(cb_industries).split('|'):
+        for token in industry.lower().split():
+            token = re.sub(r'[^a-z0-9]', '', token)
+            if len(token) >= 3:
+                cb_tokens.add(token)
+    
+    # Tokenize Orbis trade description
+    orbis_tokens = set()
+    for token in str(orbis_trade_desc).lower().split():
+        token = re.sub(r'[^a-z0-9]', '', token)
+        if len(token) >= 3:
+            orbis_tokens.add(token)
+    
+    if not cb_tokens or not orbis_tokens:
+        return 0.0
+    
+    intersection = len(cb_tokens & orbis_tokens)
+    union = len(cb_tokens | orbis_tokens)
+    return intersection / union if union > 0 else 0.0
+
+
+def description_token_overlap(cb_desc: str, orbis_trade_desc: str) -> float:
+    """
+    Token Jaccard between CB company description and Orbis trade description.
+    Both are free text — measures semantic domain similarity.
+    """
+    if not cb_desc or not orbis_trade_desc:
+        return 0.0
+    if pd.isna(cb_desc) or pd.isna(orbis_trade_desc):
+        return 0.0
+    
+    def _tokenize(text):
+        tokens = set()
+        for token in str(text).lower().split():
+            token = re.sub(r'[^a-z0-9]', '', token)
+            if len(token) >= 3:
+                tokens.add(token)
+        return tokens
+    
+    cb_tokens = _tokenize(cb_desc)
+    orbis_tokens = _tokenize(orbis_trade_desc)
+    
+    if not cb_tokens or not orbis_tokens:
+        return 0.0
+    
+    intersection = len(cb_tokens & orbis_tokens)
+    union = len(cb_tokens | orbis_tokens)
+    return intersection / union if union > 0 else 0.0
+
+
+# =============================================================================
 # FULL FEATURE COMPUTATION
 # =============================================================================
 
@@ -660,6 +728,20 @@ def compute_pair_features(
     # 7. Meta features
     features['is_generic_name'] = cb_row.get('cb_name_is_generic', False)
     features['is_free_email'] = cb_row.get('cb_is_free_email', False)
+    
+    # 8. Industry & description overlap (P1: Deal sheet data)
+    features['industry_token_overlap'] = industry_token_overlap(
+        cb_row.get('cb_industries', ''),
+        orbis_row.get('orbis_trade_desc', '')
+    )
+    features['desc_token_overlap'] = description_token_overlap(
+        cb_row.get('cb_description', ''),
+        orbis_row.get('orbis_trade_desc', '')
+    )
+    features['has_trade_desc'] = bool(
+        orbis_row.get('orbis_trade_desc') and 
+        not pd.isna(orbis_row.get('orbis_trade_desc', ''))
+    )
     
     return features
 
@@ -952,6 +1034,22 @@ def compute_features_batch(
     # --- 6. Meta ---
     df['is_generic_name'] = df.get('cb_name_is_generic', False)
     df['is_free_email'] = df.get('cb_is_free_email', False)
+    
+    # --- 8. Industry & Description Overlap (P1) ---
+    if 'cb_industries' in df.columns and 'orbis_trade_desc' in df.columns:
+        df['industry_token_overlap'] = [
+            industry_token_overlap(i, t) 
+            for i, t in zip(df['cb_industries'].fillna(''), df['orbis_trade_desc'].fillna(''))
+        ]
+        df['desc_token_overlap'] = [
+            description_token_overlap(d, t)
+            for d, t in zip(df.get('cb_description', pd.Series(['']*len(df))).fillna(''), df['orbis_trade_desc'].fillna(''))
+        ]
+        df['has_trade_desc'] = df['orbis_trade_desc'].notna() & (df['orbis_trade_desc'].astype(str).str.len() > 0)
+    else:
+        df['industry_token_overlap'] = 0.0
+        df['desc_token_overlap'] = 0.0
+        df['has_trade_desc'] = False
     
     # --- 7. Embeddings ---
     df['desc_embedding_cos'] = 0.0
