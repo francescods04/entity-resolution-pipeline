@@ -180,7 +180,13 @@ elif not os.path.exists(orbis_raw):
 
     if not orbis_files:
         print("  Copying Orbis Excel files (~5 min)...")
-        drive_files = list(Path(f"{DRIVE_BASE}/new orbis").glob("*.xlsx"))
+        drive_files = []
+        for folder in ["new orbis", "new orbis 2"]:
+            folder_path = Path(f"{DRIVE_BASE}/{folder}")
+            if folder_path.exists():
+                drive_files.extend(list(folder_path.glob("*.xlsx")))
+        
+        print(f"  Found {len(drive_files)} Excel files in Drive (new orbis + new orbis 2)")
         for i, f in enumerate(drive_files):
             if i % 100 == 0:
                 print(f"    {i}/{len(drive_files)}...", flush=True)
