@@ -46,24 +46,40 @@ if HAS_GPU:
 
 # Install packages based on hardware
 print("\n📦 Installing packages...")
-base_pkgs = "polars[calamine] pyarrow tqdm rapidfuzz pyyaml openpyxl joblib sentence-transformers scikit-learn xgboost tldextract"
-if HAS_GPU:
-    os.system(f"pip install -q {base_pkgs} faiss-gpu")
-else:
-    os.system(f"pip install -q {base_pkgs} faiss-cpu")
+faiss_pkg = "faiss-gpu" if HAS_GPU else "faiss-cpu"
+install_pkgs = [
+    "polars[calamine]", "pyarrow", "tqdm", "rapidfuzz", "pyyaml",
+    "openpyxl", "joblib", "sentence-transformers", "scikit-learn",
+    "xgboost", "tldextract", "psutil", faiss_pkg,
+]
+# Use subprocess for reliable install (os.system can fail silently on Colab)
+for attempt in range(2):
+    try:
+        subprocess.check_call(
+            [sys.executable, "-m", "pip", "install", "-q"] + install_pkgs,
+            stdout=subprocess.DEVNULL if attempt == 0 else None,
+            stderr=subprocess.DEVNULL if attempt == 0 else None,
+        )
+        break
+    except subprocess.CalledProcessError:
+        if attempt == 0:
+            print("  ⚠️  First install attempt failed, retrying with output...")
+        else:
+            print("  ❌ Package install failed. Try running the cell again.")
+            raise RuntimeError("pip install failed after 2 attempts")
 
 # Verify
 try:
-    import polars, pyarrow, tqdm, rapidfuzz, faiss, tldextract
+    import polars, pyarrow, tqdm, rapidfuzz, faiss, tldextract, psutil
     from sentence_transformers import SentenceTransformer
     faiss_type = "GPU" if HAS_GPU else "CPU"
     print(f"  ✅ All packages ready (faiss-{faiss_type.lower()}, sentence-transformers)")
 except ImportError as e:
     print(f"  ❌ Missing: {e}")
-    sys.exit(1)
+    print(f"     Run this cell again — sometimes Colab needs a second attempt.")
+    raise RuntimeError(f"Package not found: {e}")
 
 # RAM detection
-import psutil
 ram_gb = psutil.virtual_memory().total / (1024**3)
 print(f"  💾 RAM: {ram_gb:.1f} GB")
 
