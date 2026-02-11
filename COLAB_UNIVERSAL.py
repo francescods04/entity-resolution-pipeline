@@ -44,40 +44,49 @@ print(f"  🖥️  GPU: {GPU_NAME}")
 if HAS_GPU:
     print(f"  💽  VRAM: {GPU_VRAM:.1f} GB")
 
-# Install packages based on hardware
+# Install packages — split into groups so one failure doesn't block everything
 print("\n📦 Installing packages...")
-faiss_pkg = "faiss-gpu" if HAS_GPU else "faiss-cpu"
-install_pkgs = [
+
+# Group 1: Core packages (these always work)
+core_pkgs = [
     "polars[calamine]", "pyarrow", "tqdm", "rapidfuzz", "pyyaml",
     "openpyxl", "joblib", "sentence-transformers", "scikit-learn",
-    "xgboost", "tldextract", "psutil", faiss_pkg,
+    "xgboost", "tldextract", "psutil",
 ]
-# Use subprocess for reliable install (os.system can fail silently on Colab)
-for attempt in range(2):
+try:
+    subprocess.check_call(
+        [sys.executable, "-m", "pip", "install", "-q"] + core_pkgs,
+        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+    )
+    print("  ✅ Core packages installed")
+except subprocess.CalledProcessError as e:
+    print("  ⚠️  Core install failed, retrying with output...")
+    subprocess.check_call([sys.executable, "-m", "pip", "install"] + core_pkgs)
+
+# Group 2: FAISS — try GPU first, fallback to CPU
+FAISS_INSTALLED = False
+if HAS_GPU:
     try:
         subprocess.check_call(
-            [sys.executable, "-m", "pip", "install", "-q"] + install_pkgs,
-            stdout=subprocess.DEVNULL if attempt == 0 else None,
-            stderr=subprocess.DEVNULL if attempt == 0 else None,
+            [sys.executable, "-m", "pip", "install", "-q", "faiss-gpu"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
         )
-        break
+        FAISS_INSTALLED = True
+        print("  ✅ faiss-gpu installed")
     except subprocess.CalledProcessError:
-        if attempt == 0:
-            print("  ⚠️  First install attempt failed, retrying with output...")
-        else:
-            print("  ❌ Package install failed. Try running the cell again.")
-            raise RuntimeError("pip install failed after 2 attempts")
+        print("  ⚠️  faiss-gpu failed, falling back to faiss-cpu...")
+
+if not FAISS_INSTALLED:
+    subprocess.check_call(
+        [sys.executable, "-m", "pip", "install", "-q", "faiss-cpu"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+    )
+    print("  ✅ faiss-cpu installed (fallback)")
 
 # Verify
-try:
-    import polars, pyarrow, tqdm, rapidfuzz, faiss, tldextract, psutil
-    from sentence_transformers import SentenceTransformer
-    faiss_type = "GPU" if HAS_GPU else "CPU"
-    print(f"  ✅ All packages ready (faiss-{faiss_type.lower()}, sentence-transformers)")
-except ImportError as e:
-    print(f"  ❌ Missing: {e}")
-    print(f"     Run this cell again — sometimes Colab needs a second attempt.")
-    raise RuntimeError(f"Package not found: {e}")
+import polars, pyarrow, tqdm, rapidfuzz, faiss, tldextract, psutil
+from sentence_transformers import SentenceTransformer
+print(f"  ✅ All packages verified")
 
 # RAM detection
 ram_gb = psutil.virtual_memory().total / (1024**3)
