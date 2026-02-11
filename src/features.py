@@ -215,13 +215,52 @@ def domain_in_family(cb_domain: str, orbis_domains: str) -> bool:
 
 
 def _normalize_domain(d: str) -> str:
-    """Normalize domain for comparison."""
+    """
+    Extract eTLD+1 (registrable domain) for comparison.
+    
+    Correctly handles subdomains:
+        store.husarion.com → husarion.com
+        www.onepark.fr     → onepark.fr
+        example.co.uk      → example.co.uk
+    """
     if not d:
         return ''
-    d = str(d).lower().strip()
+    d = str(d).strip()
+    if not d:
+        return ''
+    
+    # Primary: tldextract for proper eTLD+1
+    try:
+        import tldextract
+        ext = tldextract.extract(d)
+        if ext.domain and ext.suffix:
+            return f"{ext.domain}.{ext.suffix}"
+        if ext.domain:
+            return ext.domain
+        return ''
+    except Exception:
+        pass
+    
+    # Fallback: manual extraction (strip protocol/www/path, then eTLD+1)
+    d = d.lower()
     d = re.sub(r'^https?://', '', d)
     d = re.sub(r'^www\d?\.', '', d)
-    d = d.split('/')[0]
+    d = d.split('/')[0].split(':')[0].split('?')[0]
+    
+    # Handle known multi-part TLDs
+    parts = d.split('.')
+    if len(parts) >= 3:
+        two_part_tld = '.'.join(parts[-2:])
+        MULTI_PART_TLDS = {
+            'co.uk', 'org.uk', 'co.nz', 'co.za', 'co.jp', 'co.kr', 'co.in',
+            'co.il', 'com.au', 'com.br', 'com.cn', 'com.hk', 'com.sg',
+            'com.mx', 'com.ar', 'com.tr', 'com.ua', 'com.pl', 'com.eg',
+        }
+        if two_part_tld in MULTI_PART_TLDS:
+            return '.'.join(parts[-3:])
+    
+    if len(parts) >= 2:
+        return '.'.join(parts[-2:])
     return d
 
 
@@ -630,9 +669,92 @@ def compute_pair_features(
 # EMBEDDING HELPERS
 # =============================================================================
 
+def _safe_load_embedding(file_path: Path) -> Optional[np.ndarray]:
+    """
+    Load embeddings from .npy or raw memmap format.
+    
+    Handles both standard numpy arrays and raw memmap files created by
+    compute_embeddings_streaming (which saves raw float16 + .meta.json).
+    """
+    import json
+    
+    if not file_path.exists():
+        return None
+    
+    # Check file isn't empty or too small
+    file_size = file_path.stat().st_size
+    if file_size < 100:  # Too small to be real embeddings
+        logger.warning(f"Embedding file too small ({file_size} bytes): {file_path.name}")
+        return None
+    
+    # Check for memmap metadata first (streaming mode)
+    meta_path = Path(str(file_path) + '.meta.json')
+    if meta_path.exists():
+        try:
+            with open(meta_path) as f:
+                meta = json.load(f)
+            shape = tuple(meta['shape'])
+            dtype = meta.get('dtype', 'float16')
+            logger.info(f"Loading memmap: {file_path.name} shape={shape}")
+            return np.memmap(str(file_path), dtype=dtype, mode='r', shape=shape)
+        except Exception as e:
+            logger.warning(f"Failed to load via meta.json: {e}")
+    
+    # Standard .npy format
+    try:
+        arr = np.load(str(file_path), mmap_mode='r')
+        logger.info(f"Loaded .npy: {file_path.name} shape={arr.shape}")
+        return arr
+    except (ValueError, Exception):
+        pass
+    
+    # Fallback: infer shape from file size
+    bytes_per_elem = np.dtype(np.float16).itemsize
+    
+    # Try companion index parquet for row count
+    index_parquet = file_path.with_name(file_path.stem + '_index.parquet')
+    if index_parquet.exists():
+        try:
+            idx_df = pd.read_parquet(index_parquet, columns=['id'])
+            n_rows = len(idx_df)
+            dim = file_size // (n_rows * bytes_per_elem)
+            del idx_df
+        except Exception:
+            n_rows, dim = None, None
+    else:
+        n_rows, dim = None, None
+    
+    if n_rows is None:
+        for dim in [384, 768, 1024]:
+            n_rows = file_size // (dim * bytes_per_elem)
+            if n_rows * dim * bytes_per_elem == file_size:
+                break
+        else:
+            dim = 384
+            n_rows = file_size // (dim * bytes_per_elem)
+    
+    shape = (n_rows, dim)
+    logger.info(f"Inferred memmap: {file_path.name} shape={shape}")
+    
+    # Save metadata for future loads
+    try:
+        with open(str(meta_path), 'w') as f:
+            json.dump({'shape': list(shape), 'dtype': 'float16'}, f)
+    except Exception:
+        pass
+    
+    try:
+        return np.memmap(str(file_path), dtype=np.float16, mode='r', shape=shape)
+    except Exception as e:
+        logger.error(f"Failed to memmap {file_path.name}: {e}")
+        return None
+
+
 def load_embedding_resources(embeddings_dir: str) -> Optional[Dict]:
     """
     Load embedding arrays (mmap) and ID maps for fast lookup.
+    
+    Handles both standard .npy and raw memmap formats transparently.
     
     Args:
         embeddings_dir: Directory containing .npy and index .parquet files
@@ -646,24 +768,33 @@ def load_embedding_resources(embeddings_dir: str) -> Optional[Dict]:
         
     resources = {}
     
-    # 1. Load Arrays (mmap for memory safety)
     try:
-        if (emb_path / 'cb_desc_emb.npy').exists():
-            resources['cb_emb'] = np.load(emb_path / 'cb_desc_emb.npy', mmap_mode='r')
-        if (emb_path / 'orbis_desc_emb.npy').exists():
-            resources['orbis_emb'] = np.load(emb_path / 'orbis_desc_emb.npy', mmap_mode='r')
+        # 1. Load Arrays (handles both .npy and raw memmap)
+        cb_emb = _safe_load_embedding(emb_path / 'cb_desc_emb.npy')
+        if cb_emb is not None:
+            resources['cb_emb'] = cb_emb
+            
+        # Try desc first, fall back to name embeddings (GPU step may produce either)
+        orbis_emb = _safe_load_embedding(emb_path / 'orbis_desc_emb.npy')
+        if orbis_emb is None:
+            orbis_emb = _safe_load_embedding(emb_path / 'orbis_name_emb.npy')
+        if orbis_emb is not None:
+            resources['orbis_emb'] = orbis_emb
             
         # 2. Load Maps (ID -> Index)
-        # We read only 'id' and 'idx' columns to save memory
         if (emb_path / 'cb_desc_emb_index.parquet').exists():
             df = pd.read_parquet(emb_path / 'cb_desc_emb_index.parquet', columns=['id', 'idx'])
             resources['cb_id_map'] = dict(zip(df['id'], df['idx']))
             
-        if (emb_path / 'orbis_desc_emb_index.parquet').exists():
-            df = pd.read_parquet(emb_path / 'orbis_desc_emb_index.parquet', columns=['id', 'idx'])
+        # Try desc index first, fall back to name index
+        orbis_idx_path = emb_path / 'orbis_desc_emb_index.parquet'
+        if not orbis_idx_path.exists():
+            orbis_idx_path = emb_path / 'orbis_name_emb_index.parquet'
+        if orbis_idx_path.exists():
+            df = pd.read_parquet(orbis_idx_path, columns=['id', 'idx'])
             resources['orbis_id_map'] = dict(zip(df['id'], df['idx']))
             
-        logger.info("Loaded embedding resources (mmap enabled)")
+        logger.info(f"Loaded embedding resources: {list(resources.keys())}")
         return resources
     except Exception as e:
         logger.warning(f"Failed to load embedding resources: {e}")
@@ -721,7 +852,7 @@ def compute_features_batch(
         logger.info(f"Using parallel processing with {n_jobs} workers for {n_pairs:,} pairs")
         try:
             from joblib import Parallel, delayed
-            import numpy as np
+            
             
             # Split into chunks
             chunk_size = (n_pairs + n_jobs - 1) // n_jobs
@@ -879,11 +1010,59 @@ def compute_features_batch(
     else:
         df['disambiguation_score'] = 0.5
 
-    df['alias_best_sim'] = 0.0 
+    df['alias_best_sim'] = 0.0
+    if alias_registry is not None:
+        # Compute alias similarity: check if orbis_name matches any CB alias
+        try:
+            alias_sims = []
+            for _, row in df[['cb_id', 'orbis_name']].iterrows():
+                cb_id = row['cb_id']
+                orbis_name = str(row['orbis_name']).lower().strip()
+                best_sim = 0.0
+                aliases = alias_registry.get_aliases(cb_id) if hasattr(alias_registry, 'get_aliases') else []
+                for alias in aliases:
+                    alias_lower = str(alias).lower().strip()
+                    if alias_lower and orbis_name:
+                        # Token overlap ratio
+                        tokens_a = set(alias_lower.split())
+                        tokens_b = set(orbis_name.split())
+                        if tokens_a and tokens_b:
+                            overlap = len(tokens_a & tokens_b) / max(len(tokens_a), len(tokens_b))
+                            best_sim = max(best_sim, overlap)
+                alias_sims.append(best_sim)
+            df['alias_best_sim'] = alias_sims
+            n_with_alias = sum(1 for s in alias_sims if s > 0)
+            logger.info(f"Computed alias_best_sim: {n_with_alias} pairs with alias signal")
+        except Exception as e:
+            logger.warning(f"Alias similarity failed: {e}")
+
+    # --- TF-IDF Name Similarity (CPU-friendly semantic feature) ---
+    try:
+        from sklearn.feature_extraction.text import TfidfVectorizer
+        from sklearn.metrics.pairwise import cosine_similarity as sklearn_cos_sim
+        
+        all_names = pd.concat([df['cb_name'], df['orbis_name']]).fillna('').tolist()
+        tfidf = TfidfVectorizer(analyzer='char_wb', ngram_range=(2, 4), max_features=50000)
+        tfidf.fit(all_names)
+        
+        cb_vecs = tfidf.transform(df['cb_name'].fillna('').tolist())
+        orbis_vecs = tfidf.transform(df['orbis_name'].fillna('').tolist())
+        
+        # Row-wise cosine similarity
+        tfidf_sims = np.array([
+            sklearn_cos_sim(cb_vecs[i:i+1], orbis_vecs[i:i+1])[0, 0]
+            for i in range(len(df))
+        ])
+        df['name_tfidf_cos'] = tfidf_sims
+        logger.info(f"Computed TF-IDF char-ngram similarity for {len(df)} pairs")
+    except Exception as e:
+        logger.warning(f"TF-IDF feature failed: {e}")
+        df['name_tfidf_cos'] = 0.0
 
     # Keep only feature columns + IDs
     feature_cols = [
         'name_jw', 'name_token_jaccard', 'name_rapidfuzz_ratio', 'name_prefix_match', 'name_acronym_match',
+        'name_tfidf_cos',
         'alias_best_sim',
         'domain_exact', 'email_domain_exact',
         'country_match', 'city_sim',
@@ -899,7 +1078,10 @@ def compute_features_batch(
          if col not in df.columns:
              df[col] = 0.0
              
-    final_cols = ['cb_id', 'bvd_id'] + feature_cols
+    # Keep IDs + names (needed by rerank) + features
+    id_cols = ['cb_id', 'bvd_id']
+    name_cols = [c for c in ['cb_name', 'orbis_name'] if c in df.columns]
+    final_cols = id_cols + name_cols + feature_cols
     return df[final_cols]
 
 

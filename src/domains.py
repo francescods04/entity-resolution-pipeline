@@ -222,10 +222,50 @@ def domains_match(domain1: str, domain2: str) -> bool:
 # BATCH PROCESSING
 # =============================================================================
 
+def _vectorized_etld1(hosts: 'pd.Series') -> 'pd.Series':
+    """
+    Extract eTLD+1 from a Series of hostnames.
+    Uses tldextract if available, otherwise falls back to manual logic.
+    """
+    import pandas as pd
+    
+    try:
+        import tldextract
+        
+        def _extract(h):
+            if not h or h == '':
+                return ''
+            ext = tldextract.extract(h)
+            if ext.domain and ext.suffix:
+                return f"{ext.domain}.{ext.suffix}"
+            return ext.domain or ''
+        
+        return hosts.apply(_extract)
+    except ImportError:
+        # Fallback: strip subdomains manually, handle multi-part TLDs
+        _MULTI = {
+            'co.uk', 'org.uk', 'co.nz', 'co.za', 'co.jp', 'co.kr', 'co.in',
+            'co.il', 'com.au', 'com.br', 'com.cn', 'com.hk', 'com.sg',
+            'com.mx', 'com.ar', 'com.tr', 'com.ua', 'com.pl', 'com.eg',
+        }
+        
+        def _manual(h):
+            if not h or h == '':
+                return ''
+            parts = h.split('.')
+            if len(parts) >= 3 and '.'.join(parts[-2:]) in _MULTI:
+                return '.'.join(parts[-3:])
+            if len(parts) >= 2:
+                return '.'.join(parts[-2:])
+            return h
+        
+        return hosts.apply(_manual)
+
+
 def extract_domain_column(urls: 'pd.Series', chunk_size: int = 500000) -> 'pd.DataFrame':
     """
-    VECTORIZED domain extraction using pandas string ops.
-    10-50x faster than apply() for large datasets.
+    VECTORIZED domain extraction using pandas string ops + tldextract eTLD+1.
+    Correctly handles subdomains (store.husarion.com → husarion.com).
     """
     import pandas as pd
     import logging
@@ -240,31 +280,33 @@ def extract_domain_column(urls: 'pd.Series', chunk_size: int = 500000) -> 'pd.Da
     # Step 1: Remove protocol (vectorized)
     s = s.str.replace(r'^https?://', '', regex=True)
     
-    # Step 2: Remove www. prefix (vectorized)
-    s = s.str.replace(r'^www\.', '', regex=True)
-    
-    # Step 3: Handle email addresses (extract domain part)
+    # Step 2: Handle email addresses (extract domain part)
     is_email = s.str.contains('@', na=False)
     s = s.where(~is_email, s.str.split('@').str[-1])
     
-    # Step 4: Remove path/query (keep only host)
+    # Step 3: Remove path/query/port (keep only host)
     s = s.str.split('/').str[0]
     s = s.str.split('?').str[0]
-    s = s.str.split(':').str[0]  # Remove port
+    s = s.str.split(':').str[0]
     
-    # Step 5: Check for free email domains (vectorized)
-    is_free_email = s.isin(FREE_EMAIL_DOMAINS)
+    # Step 4: Remove www. prefix AFTER splitting
+    s = s.str.replace(r'^www\d?\.', '', regex=True)
     
-    # Step 6: Check for ignored domains (vectorized)  
-    is_ignored = s.isin(IGNORE_DOMAINS)
+    # Step 5: Extract eTLD+1 (strips subdomains like store., app., blog.)
+    hosts_raw = s.copy()
+    etld1 = _vectorized_etld1(s)
+    
+    # Step 6: Check for free email / ignored domains (on eTLD+1)
+    is_free_email = etld1.isin(FREE_EMAIL_DOMAINS)
+    is_ignored = etld1.isin(IGNORE_DOMAINS)
     
     # Step 7: Handle empty/invalid
-    is_missing = (s == '') | (s.isna()) | (~s.str.contains('.', na=False))
+    is_missing = (etld1 == '') | (etld1.isna()) | (~etld1.str.contains('.', na=False))
     
     # Build result DataFrame
     result = pd.DataFrame({
-        'etld1': s.where(~is_missing, ''),
-        'host': s.where(~is_missing, ''),
+        'etld1': etld1.where(~is_missing, ''),
+        'host': hosts_raw.where(~is_missing, ''),
         'is_free_email': is_free_email,
         'is_ignored': is_ignored,
         'is_missing': is_missing,
