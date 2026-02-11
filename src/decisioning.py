@@ -61,6 +61,14 @@ def assign_tier(
     is_generic = row.get('is_generic_name', False)
     is_free_email = row.get('is_free_email', False)
     
+    # Pre-matched pairs: auto-accept as Tier A (Gap 5 fix)
+    blocking_source = row.get('blocking_source', '')
+    blocking_confidence = row.get('blocking_confidence', 0.0)
+    if blocking_confidence >= 0.95 and blocking_source in (
+        'prematched_bvdid', 'platinum_match', 'manual_match'
+    ):
+        return 'A'
+    
     # Reject cases
     if p < thresholds['C']:
         return 'Reject'

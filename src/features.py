@@ -1117,7 +1117,7 @@ def compute_features_batch(
                 cb_id = row['cb_id']
                 orbis_name = str(row['orbis_name']).lower().strip()
                 best_sim = 0.0
-                aliases = alias_registry.get_aliases(cb_id) if hasattr(alias_registry, 'get_aliases') else []
+                aliases = alias_registry.get_names_for_cb(cb_id)
                 for alias in aliases:
                     alias_lower = str(alias).lower().strip()
                     if alias_lower and orbis_name:

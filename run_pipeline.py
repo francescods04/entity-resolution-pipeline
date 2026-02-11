@@ -99,14 +99,83 @@ def step_ingest(config: Config, paths: Dict, logger: logging.Logger) -> None:
         if skip_orbis:
             logger.info(f"Found existing Orbis data ({orbis_output.stat().st_size / 1e6:.1f} MB). Skipping Excel conversion.")
         
+        # Try to find database-done.xlsx for enrichment
+        enrichment_file = None
+        possible_db = [
+            paths['project_root'].parent / 'database-done.xlsx',
+            Path('/content/local_pipeline/database-done.xlsx'), # Colab path
+        ]
+        for p in possible_db:
+            if p.exists():
+                enrichment_file = str(p)
+                logger.info(f"Found enrichment file: {enrichment_file}")
+                break
+        
         # Use the robust data_io module which handles the specific folder structure
         ingest_all_data(
             crunchbase_dir=str(paths['raw_crunchbase']),
             orbis_dir=str(paths['raw_orbis']),
             output_dir=str(paths['interim']),
-            skip_orbis=skip_orbis
+            skip_orbis=skip_orbis,
+            enrichment_file=enrichment_file
         )
         logger.info("Ingestion complete")
+        
+        # Gap 6: Enrich CB data with Deal sheet metadata (industries, descriptions)
+        if enrichment_file:
+            try:
+                from database_loader import extract_deal_metadata
+                deal_meta = extract_deal_metadata(enrichment_file)
+                
+                if not deal_meta.empty:
+                    cb_path = paths['interim'] / 'cb_clean' / 'cb_raw_companies.parquet'
+                    if cb_path.exists():
+                        cb_df = pd.read_parquet(cb_path)
+                        
+                        # Merge on company name (left join — only fill gaps)
+                        before_industries = cb_df['cb_industries'].notna().sum() if 'cb_industries' in cb_df.columns else 0
+                        before_desc = cb_df['cb_description'].notna().sum() if 'cb_description' in cb_df.columns else 0
+                        
+                        # Create merge key: lowercase name
+                        cb_df['_merge_key'] = cb_df['cb_name'].str.lower().str.strip()
+                        deal_meta['_merge_key'] = deal_meta['cb_name'].str.lower().str.strip()
+                        
+                        # Only merge columns that fill gaps
+                        deal_cols = {}
+                        if 'cb_industries' in deal_meta.columns:
+                            deal_cols['cb_industries'] = 'deal_industries'
+                        if 'cb_description' in deal_meta.columns:
+                            deal_cols['cb_description'] = 'deal_description'
+                        
+                        if deal_cols:
+                            merge_df = deal_meta[['_merge_key'] + list(deal_cols.keys())].rename(columns=deal_cols)
+                            merge_df = merge_df.drop_duplicates(subset='_merge_key', keep='first')
+                            cb_df = cb_df.merge(merge_df, on='_merge_key', how='left')
+                            
+                            # Fill gaps only (don't overwrite existing data)
+                            if 'deal_industries' in cb_df.columns:
+                                if 'cb_industries' not in cb_df.columns:
+                                    cb_df['cb_industries'] = None
+                                mask = cb_df['cb_industries'].isna() | (cb_df['cb_industries'] == '')
+                                cb_df.loc[mask, 'cb_industries'] = cb_df.loc[mask, 'deal_industries']
+                                cb_df = cb_df.drop(columns=['deal_industries'])
+                            
+                            if 'deal_description' in cb_df.columns:
+                                if 'cb_description' not in cb_df.columns:
+                                    cb_df['cb_description'] = None
+                                mask = cb_df['cb_description'].isna() | (cb_df['cb_description'] == '')
+                                cb_df.loc[mask, 'cb_description'] = cb_df.loc[mask, 'deal_description']
+                                cb_df = cb_df.drop(columns=['deal_description'])
+                            
+                            cb_df = cb_df.drop(columns=['_merge_key'])
+                            cb_df.to_parquet(cb_path, index=False)
+                            
+                            after_industries = cb_df['cb_industries'].notna().sum() if 'cb_industries' in cb_df.columns else 0
+                            after_desc = cb_df['cb_description'].notna().sum() if 'cb_description' in cb_df.columns else 0
+                            logger.info(f"Deal enrichment: industries {before_industries}→{after_industries}, "
+                                       f"descriptions {before_desc}→{after_desc}")
+            except Exception as e:
+                logger.warning(f"Deal metadata enrichment failed (non-fatal): {e}")
     except Exception as e:
         logger.error(f"Ingestion failed: {e}")
         raise
@@ -233,7 +302,8 @@ def step_normalize(config: Config, paths: Dict, logger: logging.Logger) -> None:
         date_col = orbis['orbis_incorp_date'].astype(str)
         
         # Detect numeric Excel serial dates (e.g., "44562" for 2022-01-01)
-        is_numeric = date_col.str.match(r'^\d+$', na=False)
+        # BUGFIX: Filter out "0" and small values which resolve to invalid dates
+        is_numeric = date_col.str.match(r'^[1-9]\d{3,}$', na=False)  # Must be >= 1000
         
         # Convert Excel serial dates: Excel epoch is 1899-12-30
         import numpy as np
@@ -247,8 +317,13 @@ def step_normalize(config: Config, paths: Dict, logger: logging.Logger) -> None:
         # Combine: use numeric where available, else parsed
         combined_dates = numeric_dates.fillna(parsed_dates)
         
-        # Extract year
-        orbis['orbis_incorp_year'] = combined_dates.dt.year
+        # Extract year with validation (filter unreasonable years)
+        extracted_year = combined_dates.dt.year
+        extracted_year = extracted_year.where(
+            (extracted_year >= 1800) & (extracted_year <= 2100), 
+            other=np.nan
+        )
+        orbis['orbis_incorp_year'] = extracted_year
         
         # Save
         logger.info("  Saving normalized Orbis data...")
@@ -320,7 +395,7 @@ def step_blocking(config: Config, paths: Dict, logger: logging.Logger) -> None:
     
     # Load indexes
     indexes = {}
-    for idx_name in ['domain', 'country_prefix', 'rare_token']:
+    for idx_name in ['domain', 'country_prefix', 'rare_token', 'vat']:
         idx_path = paths['indexes'] / f'{idx_name}_index.parquet'
         if idx_path.exists():
             indexes[idx_name] = BlockingIndex.load(str(idx_path), idx_name)
@@ -394,6 +469,46 @@ def step_blocking(config: Config, paths: Dict, logger: logging.Logger) -> None:
             logger.info(f"Added {platinum_count} platinum pairs")
         except Exception as e:
             logger.warning(f"Failed to load platinum pairs: {e}")
+        
+        # Source 3: Silver labels from Sheet 2 (P2 — 5.8K CB→Orbis name pairs)
+        try:
+            from database_loader import get_silver_label_pairs
+            silver = get_silver_label_pairs(str(db_done_path))
+            silver_count = 0
+            for _, row in silver.iterrows():
+                cb_id = cb_name_to_id.get(row['cb_name'])
+                bvd_id = orbis_name_to_id.get(row['orbis_name'])
+                if cb_id and bvd_id:
+                    prematched_candidates.append({
+                        'cb_id': cb_id,
+                        'bvd_id': bvd_id,
+                        'blocking_source': 'silver_sheet2',
+                        'blocking_confidence': 0.85
+                    })
+                    silver_count += 1
+            logger.info(f"Added {silver_count} silver label pairs (Source 3)")
+        except Exception as e:
+            logger.warning(f"Failed to load silver labels: {e}")
+        
+        # Source 4: Manual matches from Sheet 5 (P3 — ~4.4K manual matches)
+        try:
+            from database_loader import extract_manual_matches
+            manual = extract_manual_matches(str(db_done_path))
+            manual_count = 0
+            for _, row in manual.iterrows():
+                cb_id = cb_name_to_id.get(row['cb_name'])
+                bvd_id = orbis_name_to_id.get(row.get('legal_name', ''))
+                if cb_id and bvd_id:
+                    prematched_candidates.append({
+                        'cb_id': cb_id,
+                        'bvd_id': bvd_id,
+                        'blocking_source': 'manual_match',
+                        'blocking_confidence': 0.95
+                    })
+                    manual_count += 1
+            logger.info(f"Added {manual_count} manual match pairs (Source 4)")
+        except Exception as e:
+            logger.warning(f"Failed to load manual matches: {e}")
     
     # =========================================================================
     # REGULAR BLOCKING (VECTORIZED)
@@ -450,7 +565,7 @@ def step_features(config: Config, paths: Dict, logger: logging.Logger) -> None:
     logger.info("Loading Orbis data (selected columns)...")
     orbis_columns = ['bvd_id', 'orbis_name', 'orbis_website', 'orbis_email', 
                      'orbis_country', 'orbis_city', 'orbis_incorp_year', 
-                     'entity_role', 'family_size']
+                     'entity_role', 'family_size', 'orbis_trade_desc']
     
     # Load Orbis with pruning for memory safety
     try:
@@ -588,12 +703,21 @@ def step_decide(config: Config, paths: Dict, logger: logging.Logger) -> None:
     logger.info("STEP 9: DECISIONING")
     logger.info("=" * 60)
     
+    # Prefer reranked candidates (cross-encoder improved) over raw scored
+    reranked_path = paths['features'] / 'reranked_candidates.parquet'
     scored_path = paths['features'] / 'scored_candidates.parquet'
-    if not scored_path.exists():
-        logger.warning("Scored candidates not found, skipping decisioning")
+    
+    if reranked_path.exists():
+        logger.info(f"Using reranked candidates from {reranked_path}")
+        use_path = reranked_path
+    elif scored_path.exists():
+        logger.info(f"Reranked file not found, using scored candidates from {scored_path}")
+        use_path = scored_path
+    else:
+        logger.warning("No scored/reranked candidates found, skipping decisioning")
         return
     
-    scored_df = pd.read_parquet(scored_path)
+    scored_df = pd.read_parquet(use_path)
     
     # Ensure output dirs exist
     paths['matches'].mkdir(parents=True, exist_ok=True)
@@ -634,8 +758,12 @@ def step_report(config: Config, paths: Dict, logger: logging.Logger) -> None:
             return int(obj)
         elif isinstance(obj, (np.floating, np.float64, np.float32)):
             return float(obj)
+        elif isinstance(obj, (np.bool_, bool)):
+            return bool(obj)
         elif isinstance(obj, np.ndarray):
             return obj.tolist()
+        elif isinstance(obj, (np.str_, str)):
+            return str(obj)
         return obj
     
     # Generate simple report
@@ -723,7 +851,19 @@ def step_embeddings(config: Config, paths: Dict, logger: logging.Logger) -> None
     
     if cb_path.exists() and orbis_path.exists():
         cb_data = pd.read_parquet(cb_path)
-        orbis_data = pd.read_parquet(orbis_path)
+        # OPTIMIZATION: Load only columns needed for embeddings to save ~6-8 GB RAM
+        orbis_emb_cols = ['bvd_id', 'orbis_name', 'orbis_trade_desc']
+        # Also grab legal-stripped name if it exists
+        try:
+            import pyarrow.parquet as pq
+            available_cols = pq.read_schema(orbis_path).names
+            if 'orbis_name_legal_stripped' in available_cols:
+                orbis_emb_cols.append('orbis_name_legal_stripped')
+            orbis_emb_cols = [c for c in orbis_emb_cols if c in available_cols]
+        except Exception:
+            pass
+        orbis_data = pd.read_parquet(orbis_path, columns=orbis_emb_cols)
+        logger.info(f"Loaded Orbis data for embeddings: {len(orbis_data):,} rows, {len(orbis_emb_cols)} columns (RAM-optimized)")
         
         # Compute embeddings
         embeddings_dir = paths['interim'] / 'embeddings'
@@ -779,7 +919,9 @@ def step_rerank(config: Config, paths: Dict, logger: logging.Logger) -> None:
     result_df = rerank_step(
         scored_df,
         output_path=str(paths['features'] / 'reranked_candidates.parquet'),
-        model_name=model_name
+        model_name=model_name,
+        cb_data_path=str(paths['cb_clean'] / 'cb_clean.parquet'),
+        orbis_data_path=str(paths['orbis_clean'] / 'orbis_clean.parquet'),
     )
     
     logger.info(f"Re-ranked {len(result_df)} candidates")
