@@ -241,13 +241,14 @@ if not os.path.exists(orbis_raw):
     
     if not orbis_files:
         print("  Copying Orbis Excel files (this takes ~5 min)...")
-        drive_files = []
-        for folder in ["new orbis", "new orbis 2"]:
-            folder_path = Path(f"{DRIVE_BASE}/{folder}")
-            if folder_path.exists():
-                drive_files.extend(list(folder_path.glob("*.xlsx")))
+        # 'new orbis 2' is a SUBFOLDER of 'new orbis' — use rglob to find all .xlsx recursively
+        orbis_drive = Path(f"{DRIVE_BASE}/new orbis")
+        if orbis_drive.exists():
+            drive_files = list(orbis_drive.rglob("*.xlsx"))
+        else:
+            drive_files = []
         
-        print(f"  Found {len(drive_files)} Excel files in Drive (new orbis + new orbis 2)")
+        print(f"  Found {len(drive_files)} Excel files in Drive (new orbis + subfolders)")
         for i, f in enumerate(drive_files):
             if i % 100 == 0:
                 print(f"    {i}/{len(drive_files)} files...", flush=True)

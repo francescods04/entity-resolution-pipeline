@@ -7,15 +7,17 @@ Auto-detects what's available and runs ALL 13 pipeline steps:
   • L4 GPU  (24 GB VRAM) — embeddings ~15 min, total ~45 min
   • CPU-only (High-RAM)  — embeddings ~90-180 min, total ~2-4h
 
-Use this when you're low on A100 quota.
-For A100, use COLAB_A100_TURBO.py instead.
+COST SAVING STRATEGY (The "Split Workflow"):
+  1. Run on CPU:  `%run COLAB_UNIVERSAL.py --phase prep`       (Free)
+  2. Switch to GPU: `%run COLAB_UNIVERSAL.py --phase embeddings` (Paid, fast)
+  3. Switch to CPU: `%run COLAB_UNIVERSAL.py --phase finish`     (Free)
 
 RUNTIME SETUP:
   Runtime → Change runtime type → T4 / L4 / None (CPU)
   (Enable 'High-RAM' if on CPU for best results)
 """
 
-import os, sys, subprocess, time, shutil, json
+import os, sys, subprocess, time, shutil, json, argparse
 
 print("=" * 60)
 print("🔍 UNIVERSAL LAUNCHER — Auto-detecting hardware...")
@@ -180,13 +182,14 @@ elif not os.path.exists(orbis_raw):
 
     if not orbis_files:
         print("  Copying Orbis Excel files (~5 min)...")
-        drive_files = []
-        for folder in ["new orbis", "new orbis 2"]:
-            folder_path = Path(f"{DRIVE_BASE}/{folder}")
-            if folder_path.exists():
-                drive_files.extend(list(folder_path.glob("*.xlsx")))
+        # 'new orbis 2' is a SUBFOLDER of 'new orbis' — use rglob to find all .xlsx recursively
+        orbis_drive = Path(f"{DRIVE_BASE}/new orbis")
+        if orbis_drive.exists():
+            drive_files = list(orbis_drive.rglob("*.xlsx"))
+        else:
+            drive_files = []
         
-        print(f"  Found {len(drive_files)} Excel files in Drive (new orbis + new orbis 2)")
+        print(f"  Found {len(drive_files)} Excel files in Drive (new orbis + subfolders)")
         for i, f in enumerate(drive_files):
             if i % 100 == 0:
                 print(f"    {i}/{len(drive_files)}...", flush=True)
@@ -462,9 +465,36 @@ with open(config_path, 'w') as f:
 # =============================================================================
 # 5. RUN ALL 13 STEPS
 # =============================================================================
-STEPS = ['ingest', 'normalize', 'alias', 'index', 'embeddings',
-         'blocking', 'features', 'train', 'score', 'rerank',
-         'decide', 'report', 'analytics']
+# =============================================================================
+# 5. RUN PIPELINE (PHASED EXECUTION)
+# =============================================================================
+# Define Phases
+PHASES = {
+    'prep':       ['ingest', 'normalize', 'alias', 'index'],
+    'embeddings': ['embeddings'],
+    'finish':     ['blocking', 'features', 'train', 'score', 'rerank', 'decide', 'report', 'analytics'],
+    'all':        ['ingest', 'normalize', 'alias', 'index', 'embeddings', 
+                   'blocking', 'features', 'train', 'score', 'rerank', 
+                   'decide', 'report', 'analytics']
+}
+
+# Parse Args (manual parsing because Colab %run passes args weirdly)
+selected_phase = 'all'
+if len(sys.argv) > 1:
+    for arg in sys.argv:
+        if arg.startswith('--phase='):
+            selected_phase = arg.split('=')[1]
+        elif arg in ['--phase', '-p'] and sys.argv.index(arg) + 1 < len(sys.argv):
+            selected_phase = sys.argv[sys.argv.index(arg) + 1]
+
+if selected_phase not in PHASES:
+    print(f"❌ Unknown phase: '{selected_phase}'. Choose from: {list(PHASES.keys())}")
+    sys.exit(1)
+
+STEPS = PHASES[selected_phase]
+
+print(f"\n🎬 STARTING PHASE: {selected_phase.upper()}")
+print(f"   Steps: {', '.join(STEPS)}\n")
 
 os.chdir(LOCAL_PIPELINE)
 sys.path.insert(0, f"{LOCAL_PIPELINE}/src")
@@ -575,7 +605,7 @@ else:
 # 6. RESULTS
 # =============================================================================
 print("\n" + "=" * 60)
-print("🎉 PIPELINE COMPLETE!")
+print(f"🎉 PHASE '{selected_phase.upper()}' COMPLETE!")
 print("=" * 60)
 
 matches = f"{LOCAL_PIPELINE}/data/outputs/matches/matches_final.parquet"
